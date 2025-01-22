@@ -1,0 +1,162 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <assert.h>
+
+#define PAGE_SIZE 4096         // 4 KB page size
+#define MEM_SIZE 64 * 1024    // 64 KB total memory (16 pages)
+#define NUM_PAGES 16          // Number of virtual pages
+#define NUM_FRAMES 4          // Number of physical frames
+#define PAGE_DIR_SIZE 1024    // Page Directory has 1024 entries (10 bits)
+
+typedef struct {
+    uint32_t frame_number; // Frame number in physical memory
+    bool valid;            // Valid bit for page table entry
+} PageTableEntry;
+
+typedef struct {
+    uint8_t page_number;   // Page number in memory
+    bool reference_bit;    // Reference bit for page replacement
+    bool dirty_bit;        // Dirty bit for the page
+} Page;
+
+PageTableEntry page_directory[NUM_PAGES];  // Page Directory
+PageTableEntry page_table[NUM_PAGES];      // Page Table
+Page memory[NUM_FRAMES];                   // Simulated physical memory frames
+Page tlb[NUM_FRAMES];                      // Simulated TLB
+
+// Counters to keep track of hits and misses
+int page_faults = 0;
+int page_hits = 0;
+int tlb_hits = 0;
+int tlb_misses = 0;
+int clock_hand = 0; // For Clock algorithm
+
+// Function to simulate loading from a virtual address (page lookup)
+uint8_t load(uint32_t va) {
+    // Extract parts of the virtual address
+    uint32_t pd_index = (va >> 22) & 0x3FF;    // 10 bits for Page Directory Index
+    uint32_t pt_index = (va >> 12) & 0x3FF;    // 10 bits for Page Table Index
+    uint32_t offset = va & 0xFFF;               // 12 bits for offset
+
+    printf("Virtual Address: 0x%X, PD Index: %d, PT Index: %d, Offset: %d\n", va, pd_index, pt_index, offset);
+
+    // Check if the page is already in TLB
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        if (tlb[i].page_number == pd_index) {
+            tlb_hits++;
+            printf("TLB Hit: Physical Address: 0x%X\n", (tlb[i].page_number << 12) | offset);
+            return memory[tlb[i].page_number].page_number;
+        }
+    }
+    tlb_misses++;
+
+    // TLB miss - Consult the page table
+    if (page_directory[pd_index].valid) {
+        uint32_t frame = page_table[pt_index].frame_number;
+        printf("Page Table Miss: Physical Address: 0x%X\n", (frame << 12) | offset);
+        updateTLB(pd_index, frame);
+        return memory[frame].page_number;
+    }
+
+    // Page fault - Load page into memory
+    page_faults++;
+    printf("Page Fault: Loading page into memory.\n");
+    loadPageIntoMemory(pd_index, pt_index);
+    return 0;
+}
+
+// Function to simulate storing a value at a virtual address
+void store(uint32_t va) {
+    load(va);  // In this case, simulate store by loading first.
+    // Set the dirty bit because we modified the page
+    uint32_t pd_index = (va >> 22) & 0x3FF;    // 10 bits for Page Directory Index
+    uint32_t pt_index = (va >> 12) & 0x3FF;    // 10 bits for Page Table Index
+    memory[page_table[pt_index].frame_number].dirty_bit = true;
+}
+
+// Function to simulate a page fault by loading a page into memory using Clock Algorithm
+void loadPageIntoMemory(uint32_t pd_index, uint32_t pt_index) {
+    int frame_to_replace = findFrameToReplace();
+    if (frame_to_replace != -1) {
+        memory[frame_to_replace].page_number = pt_index;
+        memory[frame_to_replace].reference_bit = 1; // New page is referenced
+        memory[frame_to_replace].dirty_bit = false; // Assume the new page is clean initially
+        page_table[pt_index].frame_number = frame_to_replace;
+        page_table[pt_index].valid = true;
+        printf("Loaded page %d into frame %d.\n", pt_index, frame_to_replace);
+    } else {
+        printf("No free frames available! Page replacement required.\n");
+    }
+}
+
+// Function to find the next frame to replace using Clock Algorithm
+int findFrameToReplace() {
+    while (true) {
+        if (memory[clock_hand].reference_bit == 0) {
+            int frame_to_replace = clock_hand;
+            if (memory[frame_to_replace].dirty_bit) {
+                printf("Evicting dirty page %d from frame %d.\n", memory[frame_to_replace].page_number, frame_to_replace);
+            } else {
+                printf("Evicting clean page %d from frame %d.\n", memory[frame_to_replace].page_number, frame_to_replace);
+            }
+            memory[frame_to_replace].page_number = -1; // Mark frame as empty
+            memory[frame_to_replace].reference_bit = 0;
+            memory[frame_to_replace].dirty_bit = false; // Reset dirty bit
+            clock_hand = (clock_hand + 1) % NUM_FRAMES;
+            return frame_to_replace;
+        }
+        memory[clock_hand].reference_bit = 0; // Reset reference bit and move to the next frame
+        clock_hand = (clock_hand + 1) % NUM_FRAMES;
+    }
+}
+
+// Function to update the TLB with a new page
+void updateTLB(uint32_t pd_index, uint32_t frame_number) {
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        if (tlb[i].page_number == -1) { // First empty TLB slot
+            tlb[i].page_number = pd_index;
+            printf("Updated TLB with page %d.\n", pd_index);
+            return;
+        }
+    }
+    // If TLB is full, replace the first entry (simple policy)
+    tlb[0].page_number = pd_index;
+    printf("Replaced TLB entry with page %d.\n", pd_index);
+}
+
+// Function to simulate address translation and display stats
+void simulateAddressTranslation(uint32_t va) {
+    load(va);
+    printf("\nTotal Page Faults: %d\n", page_faults);
+    printf("Total TLB Hits: %d\n", tlb_hits);
+    printf("Total TLB Misses: %d\n", tlb_misses);
+    printf("Total Page Hits: %d\n", page_hits);
+    printf("Total Page Faults: %d\n", page_faults);
+}
+
+// Main program to run the simulation
+int main() {
+    // Initialize memory frames and TLB
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        memory[i].page_number = -1; // Empty frames
+        memory[i].reference_bit = 0;
+        memory[i].dirty_bit = false;
+        tlb[i].page_number = -1;    // Empty TLB entries
+    }
+
+    // Initialize page directory and page table entries
+    for (int i = 0; i < NUM_PAGES; i++) {
+        page_directory[i].valid = false; // Initially, pages are invalid
+        page_table[i].valid = false;     // Initially, page table entries are invalid
+    }
+
+    // Simulate some address translations
+    simulateAddressTranslation(0xA56F); // Example 1: Virtual address 0xA56F
+    simulateAddressTranslation(0xCCFF); // Example 2: Virtual address 0xCCFF
+    simulateAddressTranslation(0xFFFE); // Example 3: Virtual address 0xFFFE
+    simulateAddressTranslation(0xA56F); // Example 4: TLB Hit for 0xA56F (Revisit)
+
+    return 0;
+}
